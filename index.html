@@ -348,6 +348,18 @@
     .gate-description { margin: 10px 0 24px; color: var(--muted); font-size: 14px; }
     .gate-form { display: grid; gap: 12px; }
     .gate-form label { font-size: 12px; font-weight: 700; }
+    .gate-form > input {
+      width: 100%;
+      height: 46px;
+      padding: 0 13px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      outline: none;
+      background: var(--page);
+      color: var(--text);
+      font-size: 14px;
+    }
+    .gate-form > input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
     .password-wrap { display: flex; gap: 9px; }
     .password-wrap input {
       width: 100%;
@@ -547,12 +559,15 @@
         <div class="gate-mark" aria-hidden="true">🔐</div>
         <p class="gate-kicker">Espace privé</p>
         <h1 id="gate-title">Bon retour, Alex.</h1>
-        <p class="gate-description">Saisissez votre mot de passe pour accéder à la page d’administration.</p>
+        <p class="gate-description">Connectez-vous pour gérer vos réalisations et publier vos images.</p>
+        <p class="storage-note hidden" id="backend-notice">La connexion sécurisée n’est pas encore configurée. Créez votre projet Supabase, puis renseignez l’URL et la clé publique du projet dans le fichier index.html.</p>
         <form class="gate-form" id="gate-form">
-          <label for="access-code">Code d’accès</label>
+          <label for="admin-email">Adresse e-mail</label>
+          <input id="admin-email" name="email" type="email" autocomplete="username" placeholder="vous@exemple.fr" required>
+          <label for="admin-password">Mot de passe</label>
           <div class="password-wrap">
-            <input id="access-code" name="access-code" type="password" inputmode="numeric" autocomplete="current-password" placeholder="Votre code secret" required aria-describedby="gate-status">
-            <button class="button button-primary" type="submit">Déverrouiller <span aria-hidden="true">→</span></button>
+            <input id="admin-password" name="password" type="password" autocomplete="current-password" placeholder="Mot de passe Supabase" required aria-describedby="gate-status">
+            <button class="button button-primary" id="login-button" type="submit">Se connecter <span aria-hidden="true">→</span></button>
           </div>
           <p class="gate-status" id="gate-status" aria-live="polite"></p>
         </form>
@@ -573,7 +588,7 @@
           <section class="admin-panel" aria-labelledby="list-title">
             <h2 class="panel-title" id="list-title">Mes projets <span id="project-count"></span></h2>
             <div class="admin-list" id="admin-list"></div>
-            <p class="storage-note">Vos modifications sont enregistrées dans ce navigateur uniquement. Pour les partager en ligne, il faudra connecter le site à un hébergement et à un stockage distant.</p>
+            <p class="storage-note">Les projets sont publiés sur le site et les images sont accessibles à tous. Seul votre compte administrateur autorisé peut les modifier.</p>
           </section>
           <section class="admin-panel" aria-labelledby="form-title">
             <h2 class="panel-title" id="form-title">Ajouter un projet</h2>
@@ -595,6 +610,7 @@
               <div class="field">
                 <label for="project-image-file">Image du projet <span class="field-hint">(facultatif)</span></label>
                 <input type="hidden" id="project-image-data">
+                <input type="hidden" id="project-image-path">
                 <label class="image-picker" for="project-image-file">
                   <input id="project-image-file" type="file" accept="image/*" aria-describedby="image-upload-hint">
                   <span class="image-picker-content" id="image-picker-content">
@@ -629,8 +645,15 @@
     const projectForm = document.getElementById("project-form");
     const formStatus = document.getElementById("form-status");
     const projectCount = document.getElementById("project-count");
-    const projectsKey = "my-portofolio-projects";
-    const adminAccessCode = "86584445";
+    const SUPABASE_URL = "REPLACE_WITH_SUPABASE_PROJECT_URL";
+    const SUPABASE_ANON_KEY = "REPLACE_WITH_SUPABASE_PUBLISHABLE_KEY";
+    const SUPABASE_BUCKET = "project-images";
+    const SUPABASE_CONFIGURED =
+      SUPABASE_URL.startsWith("https://") &&
+      !SUPABASE_URL.includes("REPLACE_WITH") &&
+      SUPABASE_ANON_KEY.length > 20 &&
+      !SUPABASE_ANON_KEY.includes("REPLACE_WITH");
+    const sessionKey = "my-portofolio-auth-session";
     const starterProjects = [
       { id: "sprout-budget", icon: "🌱", name: "Sprout Budget", description: "Une application de budget intuitive pour cultiver de meilleures habitudes financières.", url: "" },
       { id: "northstar-ui", icon: "✦", name: "Northstar UI", description: "Une bibliothèque de composants élégants pour créer des expériences cohérentes.", url: "" },
@@ -640,35 +663,137 @@
     const savedTheme = localStorage.getItem("portfolio-theme");
     if (savedTheme === "light" || savedTheme === "dark") root.dataset.theme = savedTheme;
 
-    function readProjects() {
-      try {
-        const stored = localStorage.getItem(projectsKey);
-        if (stored === null) return starterProjects.slice();
-        const parsed = JSON.parse(stored);
-        if (!Array.isArray(parsed) || !parsed.every(project =>
-          project && typeof project.id === "string" && typeof project.name === "string" &&
-          typeof project.description === "string" && typeof project.icon === "string" &&
-          typeof project.url === "string" && (project.image === undefined || typeof project.image === "string")
-        )) throw new Error("Les projets enregistrés ne sont pas valides.");
-        return parsed;
-      } catch (error) {
-        console.error("Impossible de charger les projets :", error);
-        return starterProjects.slice();
-      }
+    let projects = starterProjects.slice();
+    let supabaseSession = null;
+    let adminUnlocked = false;
+    let pendingSave = false;
+
+    function apiHeaders(useSession = false) {
+      return {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${useSession && supabaseSession ? supabaseSession.access_token : SUPABASE_ANON_KEY}`
+      };
     }
 
-    let projects = readProjects();
-    let adminUnlocked = false;
-    function saveProjects() {
-      try {
-        localStorage.setItem(projectsKey, JSON.stringify(projects));
-        return true;
-      } catch (error) {
-        console.error("Impossible d’enregistrer les projets :", error);
-        formStatus.textContent = "Enregistrement impossible. Vérifiez l’espace disponible du navigateur.";
-        formStatus.style.color = "#bc5360";
-        return false;
+    async function refreshSessionIfNeeded() {
+      if (!supabaseSession?.expires_at || supabaseSession.expires_at * 1000 > Date.now() + 60000) return;
+      const refreshed = await supabaseRequest("/auth/v1/token?grant_type=refresh_token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: supabaseSession.refresh_token })
+      });
+      supabaseSession = refreshed;
+      sessionStorage.setItem(sessionKey, JSON.stringify(refreshed));
+    }
+
+    async function supabaseRequest(path, options = {}, useSession = false) {
+      if (useSession) await refreshSessionIfNeeded();
+      const response = await fetch(`${SUPABASE_URL}${path}`, {
+        ...options,
+        headers: { ...apiHeaders(useSession), ...options.headers }
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.msg || body?.message || body?.error_description || body?.error || `Erreur Supabase (${response.status}).`);
       }
+      if (response.status === 204) return null;
+      return response.json();
+    }
+
+    function mapProject(row) {
+      const image = row.image_path
+        ? `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${row.image_path.split("/").map(encodeURIComponent).join("/")}`
+        : "";
+      return {
+        id: row.id,
+        name: row.title,
+        description: row.description,
+        icon: row.icon || "✨",
+        url: row.url || "",
+        image,
+        image_path: row.image_path || ""
+      };
+    }
+
+    async function loadProjects() {
+      const rows = await supabaseRequest(
+        "/rest/v1/portfolio_projects?select=id,title,description,icon,url,image_path,created_at&order=created_at.desc"
+      );
+      projects = rows.map(mapProject);
+      renderPortfolio();
+    }
+
+    async function checkAdminAccess() {
+      if (!supabaseSession) return false;
+      const isAdmin = await supabaseRequest(
+        "/rest/v1/rpc/is_portfolio_admin",
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+        true
+      );
+      return isAdmin === true;
+    }
+
+    function publicImageUrl(path) {
+      return `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${path.split("/").map(encodeURIComponent).join("/")}`;
+    }
+
+    async function uploadImage(projectId, imageData) {
+      const blob = await fetch(imageData).then(response => response.blob());
+      const path = `${supabaseSession.user.id}/${projectId}.jpg`;
+      await supabaseRequest(
+        `/storage/v1/object/${SUPABASE_BUCKET}/${path.split("/").map(encodeURIComponent).join("/")}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "image/jpeg", "x-upsert": "true" },
+          body: blob
+        },
+        true
+      );
+      return path;
+    }
+
+    async function removeImage(path) {
+      if (!path) return;
+      await supabaseRequest(
+        `/storage/v1/object/${SUPABASE_BUCKET}`,
+        { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prefixes: [path] }) },
+        true
+      );
+    }
+
+    async function authenticate(email, password) {
+      const response = await supabaseRequest(
+        "/auth/v1/token?grant_type=password",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password })
+        }
+      );
+      supabaseSession = response;
+      sessionStorage.setItem(sessionKey, JSON.stringify(response));
+      if (!await checkAdminAccess()) {
+        await signOut();
+        throw new Error("Ce compte n’est pas autorisé à administrer ce portfolio.");
+      }
+      adminUnlocked = true;
+      await loadProjects();
+    }
+
+    async function signOut() {
+      if (supabaseSession) {
+        try {
+          await supabaseRequest("/auth/v1/logout", { method: "POST" }, true);
+        } catch (error) {
+          console.error("La session n’a pas pu être révoquée côté Supabase :", error);
+          return error;
+        } finally {
+          supabaseSession = null;
+          adminUnlocked = false;
+          sessionStorage.removeItem(sessionKey);
+        }
+      }
+      return null;
     }
 
     function renderPortfolio() {
@@ -775,11 +900,13 @@
       document.getElementById("projects-nav").classList.toggle("hidden", isAdmin);
       document.getElementById("admin-nav").classList.toggle("hidden", isAdmin);
       document.getElementById("projects-nav").setAttribute("aria-current", isAdmin ? "false" : "page");
+      document.getElementById("backend-notice").classList.toggle("hidden", !isAdmin || SUPABASE_CONFIGURED);
+      document.getElementById("gate-form").classList.toggle("hidden", !SUPABASE_CONFIGURED);
       document.getElementById("admin-gate").classList.toggle("hidden", !isAdmin || adminUnlocked);
       document.getElementById("admin-content").classList.toggle("hidden", !isAdmin || !adminUnlocked);
       if (isAdmin) {
         if (adminUnlocked) document.getElementById("project-name").focus({ preventScroll: true });
-        else document.getElementById("access-code").focus({ preventScroll: true });
+        else if (SUPABASE_CONFIGURED) document.getElementById("admin-email").focus({ preventScroll: true });
       }
     }
 
@@ -788,6 +915,7 @@
       document.getElementById("project-id").value = "";
       document.getElementById("project-icon").value = "✨";
       document.getElementById("project-image-data").value = "";
+      document.getElementById("project-image-path").value = "";
       document.getElementById("project-image-file").value = "";
       renderImagePicker();
       document.getElementById("form-title").textContent = "Ajouter un projet";
@@ -805,6 +933,7 @@
       document.getElementById("project-description").value = project.description;
       document.getElementById("project-icon").value = project.icon;
       document.getElementById("project-image-data").value = project.image || "";
+      document.getElementById("project-image-path").value = project.image_path || "";
       document.getElementById("project-image-file").value = "";
       renderImagePicker(project.image || "");
       document.getElementById("project-url").value = project.url;
@@ -816,13 +945,31 @@
       document.getElementById("form-title").scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
-    function deleteProject(id) {
+    async function deleteProject(id) {
       const project = projects.find(item => item.id === id);
       if (!project || !window.confirm(`Supprimer « ${project.name} » ?`)) return;
-      projects = projects.filter(item => item.id !== id);
-      if (!saveProjects()) return;
-      if (document.getElementById("project-id").value === id) resetForm();
-      render();
+      try {
+        await supabaseRequest(`/rest/v1/portfolio_projects?id=eq.${encodeURIComponent(id)}`, {
+          method: "DELETE",
+          headers: { Prefer: "return=minimal" }
+        }, true);
+        projects = projects.filter(item => item.id !== id);
+        if (document.getElementById("project-id").value === id) resetForm();
+        render();
+        if (project.image_path) {
+          try {
+            await removeImage(project.image_path);
+          } catch (error) {
+            console.error("Projet supprimé, mais l’image n’a pas pu être supprimée :", error);
+            formStatus.style.color = "#bc5360";
+            formStatus.textContent = "Projet supprimé ; nettoyage de son image impossible.";
+          }
+        }
+      } catch (error) {
+        console.error("Impossible de supprimer le projet :", error);
+        formStatus.style.color = "#bc5360";
+        formStatus.textContent = `Suppression impossible : ${error.message}`;
+      }
     }
 
     function renderImagePicker(imageData = document.getElementById("project-image-data").value) {
@@ -844,6 +991,7 @@
           event.preventDefault();
           event.stopPropagation();
           document.getElementById("project-image-data").value = "";
+          document.getElementById("project-image-path").value = "";
           document.getElementById("project-image-file").value = "";
           renderImagePicker("");
         });
@@ -936,48 +1084,164 @@
           return;
         }
       }
+      const projectId = id || crypto.randomUUID();
       const project = {
-        id: id || (window.crypto && crypto.randomUUID ? crypto.randomUUID() : `project-${Date.now()}`),
+        id: projectId,
         name: document.getElementById("project-name").value.trim(),
         description: document.getElementById("project-description").value.trim(),
         icon: document.getElementById("project-icon").value.trim() || "✨",
         url,
-        image: document.getElementById("project-image-data").value
+        image: document.getElementById("project-image-data").value,
+        image_path: document.getElementById("project-image-path").value
       };
       if (!project.name || !project.description) return;
-      const previousProjects = projects;
-      projects = id ? projects.map(item => item.id === id ? project : item) : [...projects, project];
-      if (!saveProjects()) {
-        projects = previousProjects;
-        return;
-      }
-      render();
-      resetForm();
-      formStatus.textContent = id ? "Modifications enregistrées !" : "Projet ajouté à votre portfolio !";
+      if (pendingSave) return;
+      pendingSave = true;
+      const saveButton = document.getElementById("save-button");
+      saveButton.disabled = true;
+      formStatus.style.color = "";
+      formStatus.textContent = "Publication du projet…";
+      (async () => {
+        let uploadedPath = "";
+        let databaseSaved = false;
+        try {
+          if (!supabaseSession || !adminUnlocked) throw new Error("Reconnectez-vous pour publier.");
+          const previousProject = id ? projects.find(item => item.id === id) : null;
+          if (project.image.startsWith("data:image/")) {
+            uploadedPath = await uploadImage(projectId, project.image);
+            project.image_path = uploadedPath;
+          } else if (!project.image) {
+            project.image_path = "";
+          }
+          const record = {
+            id: project.id,
+            owner_id: supabaseSession.user.id,
+            title: project.name,
+            description: project.description,
+            icon: project.icon,
+            url: project.url || null,
+            image_path: project.image_path || null
+          };
+          const path = id
+            ? `/rest/v1/portfolio_projects?id=eq.${encodeURIComponent(id)}`
+            : "/rest/v1/portfolio_projects";
+          await supabaseRequest(path, {
+            method: id ? "PATCH" : "POST",
+            headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
+            body: JSON.stringify(record)
+          }, true);
+          databaseSaved = true;
+          let cleanupWarning = false;
+          if (previousProject?.image_path && previousProject.image_path !== project.image_path) {
+            try {
+              await removeImage(previousProject.image_path);
+            } catch (error) {
+              console.error("Projet publié, mais l’ancienne image n’a pas pu être supprimée :", error);
+              cleanupWarning = true;
+            }
+          }
+          try {
+            await loadProjects();
+          } catch (error) {
+            console.error("Projet publié, mais l’actualisation de la liste a échoué :", error);
+            project.image = project.image_path ? publicImageUrl(project.image_path) : "";
+            projects = id
+              ? projects.map(item => item.id === id ? project : item)
+              : [project, ...projects];
+            render();
+          }
+          resetForm();
+          formStatus.textContent = cleanupWarning
+            ? "Projet publié ; nettoyage de l’ancienne image impossible."
+            : (id ? "Modifications publiées !" : "Projet publié sur votre portfolio !");
+        } catch (error) {
+          console.error("Impossible de publier le projet :", error);
+          if (uploadedPath && !databaseSaved) {
+            try {
+              await removeImage(uploadedPath);
+            } catch (cleanupError) {
+              console.error("Impossible de nettoyer l’image non publiée :", cleanupError);
+            }
+          }
+          formStatus.style.color = "#bc5360";
+          formStatus.textContent = `Publication impossible : ${error.message}`;
+        } finally {
+          pendingSave = false;
+          saveButton.disabled = false;
+        }
+      })();
     });
 
     document.getElementById("cancel-edit").addEventListener("click", resetForm);
     window.addEventListener("hashchange", showPage);
-    document.getElementById("gate-form").addEventListener("submit", event => {
+    document.getElementById("gate-form").addEventListener("submit", async event => {
       event.preventDefault();
-      const input = document.getElementById("access-code");
+      if (!SUPABASE_CONFIGURED) return;
       const status = document.getElementById("gate-status");
-      if (input.value !== adminAccessCode) {
-        status.textContent = "Code incorrect. Veuillez réessayer.";
-        input.value = "";
-        input.focus();
-        return;
-      }
-      adminUnlocked = true;
-      input.value = "";
+      const button = document.getElementById("login-button");
       status.textContent = "";
-      showPage();
+      button.disabled = true;
+      button.textContent = "Connexion…";
+      try {
+        await authenticate(
+          document.getElementById("admin-email").value.trim(),
+          document.getElementById("admin-password").value
+        );
+        document.getElementById("admin-password").value = "";
+        showPage();
+        renderAdminList();
+      } catch (error) {
+        console.error("Échec de connexion administrateur :", error);
+        status.textContent = error.message || "Connexion impossible. Vérifiez vos identifiants.";
+      } finally {
+        button.disabled = false;
+        button.innerHTML = 'Se connecter <span aria-hidden="true">→</span>';
+      }
     });
-    document.getElementById("logout-button").addEventListener("click", () => {
-      adminUnlocked = false;
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      const error = await signOut();
       resetForm();
       showPage();
+      if (error) {
+        const status = document.getElementById("gate-status");
+        status.textContent = "Session fermée sur cet appareil, mais sa révocation distante a échoué.";
+      }
     });
+
+    async function restoreSession() {
+      if (!SUPABASE_CONFIGURED) return;
+      try {
+        const stored = sessionStorage.getItem(sessionKey);
+        if (!stored) return;
+        supabaseSession = JSON.parse(stored);
+        await refreshSessionIfNeeded();
+        adminUnlocked = await checkAdminAccess();
+        if (!adminUnlocked) {
+          await signOut();
+          return;
+        }
+        await loadProjects();
+        showPage();
+        renderAdminList();
+      } catch (error) {
+        console.error("Impossible de restaurer la session admin :", error);
+        await signOut();
+      }
+    }
+
+    async function loadPublicProjects() {
+      if (!SUPABASE_CONFIGURED) return;
+      try {
+        await loadProjects();
+      } catch (error) {
+        console.error("Impossible de charger les réalisations publiques :", error);
+        projectGrid.replaceChildren();
+        const message = document.createElement("p");
+        message.className = "empty-admin";
+        message.textContent = "Les réalisations seront bientôt disponibles.";
+        projectGrid.append(message);
+      }
+    }
 
     function updateToggleLabel() {
       const isDark = root.dataset.theme
@@ -999,6 +1263,8 @@
     render();
     showPage();
     updateToggleLabel();
+    loadPublicProjects();
+    restoreSession();
   </script>
 </body>
 </html>
