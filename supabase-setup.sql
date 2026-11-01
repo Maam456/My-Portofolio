@@ -18,12 +18,30 @@ create table if not exists public.portfolio_projects (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.portfolio_profile (
+  id integer primary key check (id = 1),
+  owner_id uuid not null references auth.users (id) on delete cascade,
+  full_name text not null check (char_length(full_name) between 1 and 80),
+  profession text not null check (char_length(profession) between 1 and 100),
+  bio text not null check (char_length(bio) between 1 and 240),
+  email text,
+  phone text,
+  instagram_url text,
+  linkedin_url text,
+  github_url text,
+  website_url text,
+  updated_at timestamptz not null default now()
+);
+
 alter table public.portfolio_admins enable row level security;
 alter table public.portfolio_projects enable row level security;
+alter table public.portfolio_profile enable row level security;
 
 revoke all on public.portfolio_admins from anon, authenticated;
 grant select on public.portfolio_projects to anon, authenticated;
 grant insert, update, delete on public.portfolio_projects to authenticated;
+grant select on public.portfolio_profile to anon, authenticated;
+grant insert, update on public.portfolio_profile to authenticated;
 
 create or replace function public.is_portfolio_admin()
 returns boolean
@@ -66,6 +84,25 @@ create policy "Portfolio admin can delete own projects"
   on public.portfolio_projects for delete
   to authenticated
   using (public.is_portfolio_admin() and owner_id = (select auth.uid()));
+
+drop policy if exists "Anyone can view portfolio profile" on public.portfolio_profile;
+create policy "Anyone can view portfolio profile"
+  on public.portfolio_profile for select
+  to anon, authenticated
+  using (true);
+
+drop policy if exists "Portfolio admin can add profile" on public.portfolio_profile;
+create policy "Portfolio admin can add profile"
+  on public.portfolio_profile for insert
+  to authenticated
+  with check (public.is_portfolio_admin() and owner_id = (select auth.uid()));
+
+drop policy if exists "Portfolio admin can update profile" on public.portfolio_profile;
+create policy "Portfolio admin can update profile"
+  on public.portfolio_profile for update
+  to authenticated
+  using (public.is_portfolio_admin() and owner_id = (select auth.uid()))
+  with check (public.is_portfolio_admin() and owner_id = (select auth.uid()));
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('project-images', 'project-images', true, 15728640, array['image/jpeg'])
